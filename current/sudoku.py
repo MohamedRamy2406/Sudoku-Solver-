@@ -80,23 +80,74 @@ def deselect(X, Y, r, cols):
 
 
 def solve_wrapper(squares_num_array):
-    if squares_num_array.count('0') >= 80:
+
+    # Validate input format
+    if not isinstance(squares_num_array, str):
+        return None, None
+
+    if len(squares_num_array) != 81:
+        return None, None
+
+    if any(c not in "0123456789" for c in squares_num_array):
+        return None, None
+
+    # Reject puzzles with insufficient clues
+    if 81 - squares_num_array.count("0") < 17:
         return None, None
 
     start = time.time()
 
-    # convert string to 9x9 array
-    arr = []
-    for i in squares_num_array:
-        arr.append(int(i))
+    arr = np.array(
+        list(map(int, squares_num_array)),
+        dtype=int
+    ).reshape(9, 9)
 
-    arr = np.array(arr, dtype=int)
-    arr = np.reshape(arr, (9, 9))
+    # Validate rows, columns and boxes
+    groups = list(arr) + list(arr.T)
+
+    for row in range(0, 9, 3):
+        for col in range(0, 9, 3):
+            groups.append(
+                arr[row:row + 3, col:col + 3].flatten()
+            )
+
+    for group in groups:
+        numbers = [n for n in group if n != 0]
+
+        if len(numbers) != len(set(numbers)):
+            return None, None
+
+    # Search for at most two solutions
+    solutions = solve_sudoku(
+        size=(3, 3),
+        grid=arr.copy()
+    )
+
     try:
-        ans = list(solve_sudoku(size=(3, 3), grid=arr))[0]
-        s = ""
-        for a in ans:
-            s += "".join(str(x) for x in a)
-        return s, "Solved in %.4fs" % (time.time() - start)
-    except:
+        first = next(solutions, None)
+
+        if first is None:
+            return None, None
+
+        # Copy because the generator modifies its grid
+        first = first.copy()
+
+        second = next(solutions, None)
+
+        # Reject ambiguous puzzles
+        if second is not None:
+            return None, None
+
+        solved = "".join(
+            str(n) for n in first.flatten()
+        )
+
+        elapsed = time.time() - start
+
+        return solved, "Solved in %.4fs" % elapsed
+
+    except (KeyError, ValueError):
         return None, None
+
+    finally:
+        solutions.close()

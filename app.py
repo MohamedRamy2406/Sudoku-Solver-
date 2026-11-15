@@ -1,81 +1,318 @@
-import time as t
-
+import time
 import cv2
+
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 from current import process, sudoku
 from models import model_wrapper
 from preprocessing import preprocess
 
-frameWidth = 960
-frameHeight = 720
 
-cap = cv2.VideoCapture(0)
-frame_rate = 30
+FRAME_WIDTH = 960
+FRAME_HEIGHT = 720
+CACHE_LIMIT = 100
 
-# width is id number 3, height is id 4
-cap.set(3, frameWidth)
-cap.set(4, frameHeight)
+WINDOW_NAME = "Sudoku Solver"
 
-# change brightness to 150
-cap.set(10, 150)
 
-# load the model with weights
-my_model = model_wrapper.model_wrapper(None, False, None, "model.hdf5")
+def add_status(img, message, color=(0, 255, 0)):
 
-prev = 0
+    cv2.putText(
+        img,
+        message,
+        (15, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        color,
+        2
+    )
 
-seen = dict()
+    return img
 
-while True:
-    time_elapsed = t.time() - prev
 
-    success, img = cap.read()
+def process_frame(img, model, seen):
 
-    if time_elapsed > 1. / frame_rate:
-        prev = t.time()
+    result = img.copy()
 
-        img_result = img.copy()
-        img_corners = img.copy()
+    try:
 
-        processed_img = preprocess.preprocess(img)
-        corners = process.find_contours(processed_img, img_corners)
+        # 1. Preprocess original image
+        processed = preprocess.preprocess(img)
 
-        if corners:
-            warped, matrix = process.warp_image(corners, img)
-            warped_processed = preprocess.preprocess(warped)
+        # 2. Detect Sudoku corners
+        corners = process.find_contours(
+            processed,
+            img.copy()
+        )
 
-            vertical_lines, horizontal_lines = process.get_grid_lines(warped_processed)
-            mask = process.create_grid_mask(vertical_lines, horizontal_lines)
-            numbers = cv2.bitwise_and(warped_processed, mask)
+        if not corners:
 
-            squares = process.split_into_squares(numbers)
-            squares_processed = process.clean_squares(squares)
+            return add_status(
+                result,
+                "Searching for Sudoku...",
+                (0, 255, 255)
+            )
 
-            squares_guesses = process.recognize_digits(squares_processed, my_model)
+        # 3. Correct perspective
+        warped, matrix = process.warp_image(
+            corners, img
+        )
 
-            # if it is impossible, continue
-            if squares_guesses in seen and seen[squares_guesses] is False:
-                continue
+        # 4. Extract standardized digit images
+        cleaned = process.extract_grayscale_cells(
+            warped
+        )
 
-            # if we already solved this puzzle, just fetch the solution
-            if squares_guesses in seen:
-                process.draw_digits_on_warped(warped, seen[squares_guesses][0], squares_processed)
-                img_result = process.unwarp_image(warped, img_result, corners, seen[squares_guesses][1])
+        if len(cleaned) != 81:
+
+            return add_status(
+                result,
+                "Cell extraction failed",
+                (0, 0, 255)
+            )
+
+        # 5. Recognize digits using CNN
+        recognized = process.recognize_digits(
+            cleaned,
+            model
+        )
+
+        clues = 81 - recognized.count("0")
+
+        if clues < 17:
+
+            return add_status(
+                result,
+                f"Insufficient clues: {clues}",
+                (0, 255, 255)
+            )
+
+        # 6. Check solution cache
+        if recognized in seen:
+
+            solved, elapsed = seen[recognized]
+            seen.move_to_end(recognized)
+
+        else:
+
+            # 7. Solve Sudoku
+            solved, elapsed = sudoku.solve_wrapper(
+                recognized
+            )
+
+            if solved is not None:
+
+                seen[recognized] = (
+                    solved, elapsed
+                )
+
+                if len(seen) > CACHE_LIMIT:
+                    seen.popitem(last=False)
+
+                print("\nSudoku recognized:")
+
+                for row in range(9):
+
+                    print(
+                        recognized[
+                            row * 9:(row + 1) * 9
+                        ]
+                    )
+
+                print("\nSudoku solved!")
+                print(elapsed)
+
+        # 8. Handle invalid or ambiguous puzzles
+        if solved is None:
+
+            return add_status(
+                result,
+                f"No unique solution - Clues: {clues}",
+                (0, 255, 255)
+            )
+
+        # 9. Draw missing digits
+        process.draw_digits_on_warped(
+            warped,
+            solved,
+            cleaned
+        )
+
+        # 10. Project solution onto camera frame
+        result = process.unwarp_image(
+            warped,
+            img.copy(),
+            corners,
+            elapsed
+        )
+
+        return add_status(
+            result,
+            f"Sudoku solved! Clues: {clues}"
+        )
+
+    except Exception as error:
+
+        print("Processing error:", error)
+
+        return add_status(
+            img.copy(),
+            "Processing failed - retrying",
+            (0, 0, 255)
+        )
+
+
+def main():
+
+    print("Loading trained model...")
+
+    my_model = model_wrapper.model_wrapper(
+        None,
+        False,
+        None,
+        "model.hdf5"
+    )
+
+    print("Model loaded successfully.")
+
+    # Open webcam
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+
+        print("ERROR: Cannot open webcam.")
+        cap.release()
+        return
+
+    cap.set(
+        cv2.CAP_PROP_FRAME_WIDTH,
+        FRAME_WIDTH
+    )
+
+    cap.set(
+        cv2.CAP_PROP_FRAME_HEIGHT,
+        FRAME_HEIGHT
+    )
+
+    actual_width = int(
+        cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    )
+
+    actual_height = int(
+        cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    )
+
+    print(
+        f"Camera resolution: "
+        f"{actual_width}x{actual_height}"
+    )
+
+    seen = OrderedDict()
+
+    # Run frame processing in a background thread
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    future = None
+    latest_result = None
+    result_time = 0
+
+    print("Webcam opened.")
+    print("Press q to quit.")
+    print("Press s to save a raw camera frame.")
+
+    try:
+
+        while True:
+
+            success, frame = cap.read()
+
+            if not success:
+
+                print("ERROR: Cannot read camera frame.")
+                break
+
+            # Retrieve processed frame
+            if future is not None and future.done():
+
+                try:
+
+                    latest_result = future.result()
+
+                except Exception as error:
+
+                    print("Frame error:", error)
+
+                    latest_result = add_status(
+                        frame.copy(),
+                        "Processing error",
+                        (0, 0, 255)
+                    )
+
+                result_time = time.monotonic()
+                future = None
+
+            # Process the newest available frame
+            if future is None:
+
+                future = executor.submit(
+                    process_frame,
+                    frame.copy(),
+                    my_model,
+                    seen
+                )
+
+            # Select frame for display
+            if (
+                latest_result is not None
+                and time.monotonic() - result_time < 1.0
+            ):
+
+                display = latest_result
 
             else:
-                solved_puzzle, time = sudoku.solve_wrapper(squares_guesses)
-                if solved_puzzle is not None:
-                    process.draw_digits_on_warped(warped, solved_puzzle, squares_processed)
-                    img_result = process.unwarp_image(warped, img_result, corners, time)
-                    seen[squares_guesses] = [solved_puzzle, time]
+
+                display = add_status(
+                    frame.copy(),
+                    "Processing..."
+                )
+
+            # Display one webcam window
+            cv2.imshow(WINDOW_NAME, display)
+
+            key = cv2.waitKey(1) & 0xFF
+
+            # Exit application
+            if key == ord("q"):
+                break
+
+            # Save current raw frame
+            if key == ord("s"):
+
+                if cv2.imwrite(
+                    "webcam_capture.png", frame
+                ):
+
+                    print("Camera frame saved.")
 
                 else:
-                    seen[squares_guesses] = False
 
-    cv2.imshow('window', img_result)
+                    print("Failed to save frame.")
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    except KeyboardInterrupt:
 
-cv2.destroyAllWindows()
-cap.release()
+        print("\nInterrupted by user.")
+
+    finally:
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+        executor.shutdown(wait=True)
+
+        print("Webcam released.")
+        print("Application closed.")
+
+
+if __name__ == "__main__":
+    main()

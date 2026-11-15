@@ -6,18 +6,38 @@ from helpers import process_helpers
 
 
 def create_grid_mask(vertical, horizontal):
-    # combine the vertical and horizontal lines to make a grid
-    grid = cv2.add(horizontal, vertical)
-    # threshold and dilate the grid to cover more area
-    grid = cv2.adaptiveThreshold(grid, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 235, 2)
-    grid = cv2.dilate(grid, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=2)
 
-    # find the list of where the lines are, this is an array of (rho, theta in radians)
-    pts = cv2.HoughLines(grid, .3, np.pi / 90, 200)
+    grid = cv2.add(horizontal, vertical)
+
+    grid = cv2.adaptiveThreshold(
+        grid,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        235,
+        2
+    )
+
+    grid = cv2.dilate(
+        grid,
+        cv2.getStructuringElement(
+            cv2.MORPH_RECT, (3, 3)
+        ),
+        iterations=2
+    )
+
+    pts = cv2.HoughLines(
+        grid, 0.3, np.pi / 90, 200
+    )
+
+    # Safely reject unsuccessful line detection
+    if pts is None:
+        raise ValueError("No grid lines detected")
 
     lines = process_helpers.draw_lines(grid, pts)
-    # extract the lines so only the numbers remain
+
     mask = cv2.bitwise_not(lines)
+
     return mask
 
 
@@ -28,46 +48,76 @@ def get_grid_lines(img, length=10):
 
 
 def find_contours(img, original):
-    # find contours on thresholded image
-    contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(
+        img,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
 
-    # sort by the largest
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-    polygon = None
+    contours = sorted(
+        contours,
+        key=cv2.contourArea,
+        reverse=True
+    )
 
-    # make sure this is the one we are looking for
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        perimeter = cv2.arcLength(cnt, closed=True)
-        approx = cv2.approxPolyDP(cnt, 0.01 * perimeter, closed=True)
-        num_corners = len(approx)
 
-        if num_corners == 4 and area > 1000:
-            polygon = cnt
-            break
+        if area < 1000:
+            continue
 
-    if polygon is not None:
-        # find its extreme corners
-        top_left = process_helpers.find_extreme_corners(polygon, min, np.add)  # has smallest (x + y) value
-        top_right = process_helpers.find_extreme_corners(polygon, max, np.subtract)  # has largest (x - y) value
-        bot_left = process_helpers.find_extreme_corners(polygon, min, np.subtract)  # has smallest (x - y) value
-        bot_right = process_helpers.find_extreme_corners(polygon, max, np.add)  # has largest (x + y) value
+        perimeter = cv2.arcLength(cnt, True)
 
-        # if its not a square, we don't want it
-        if bot_right[1] - top_right[1] == 0:
-            return []
-        if not (0.95 < ((top_right[0] - top_left[0]) / (bot_right[1] - top_right[1])) < 1.05):
-            return []
+        approx = cv2.approxPolyDP(
+            cnt,
+            0.01 * perimeter,
+            True
+        )
 
-        cv2.drawContours(original, [polygon], 0, (0, 0, 255), 3)
+        if len(approx) != 4:
+            continue
 
-        # draw corresponding circles
-        [process_helpers.draw_extreme_corners(x, original) for x in [top_left, top_right, bot_right, bot_left]]
+        if not cv2.isContourConvex(approx):
+            continue
 
-        return [top_left, top_right, bot_right, bot_left]
+        top_left = process_helpers.find_extreme_corners(
+            approx, min, np.add
+        )
+
+        top_right = process_helpers.find_extreme_corners(
+            approx, max, np.subtract
+        )
+
+        bot_left = process_helpers.find_extreme_corners(
+            approx, min, np.subtract
+        )
+
+        bot_right = process_helpers.find_extreme_corners(
+            approx, max, np.add
+        )
+
+        corners = [
+            top_left,
+            top_right,
+            bot_right,
+            bot_left
+        ]
+
+        if len(set(corners)) != 4:
+            continue
+
+        cv2.drawContours(
+            original, [approx], 0, (0, 0, 255), 3
+        )
+
+        for point in corners:
+            process_helpers.draw_extreme_corners(
+                point, original
+            )
+
+        return corners
 
     return []
-
 
 def warp_image(corners, original):
     # we will be warping these points
@@ -123,30 +173,54 @@ def clean_squares(squares):
 
 
 def recognize_digits(squares_processed, model):
-    s = ""
     formatted_squares = []
-    location_of_zeroes = set()
+    positions = []
 
-    # img =
-    blank_image = np.zeros_like(cv2.resize(squares_processed[0], (32, 32)))
+    if len(squares_processed) != 81:
+        raise ValueError("Expected exactly 81 Sudoku cells")
 
-    for i in range(len(squares_processed)):
-        if type(squares_processed[i]) == int:
-            location_of_zeroes.add(i)
-            formatted_squares.append(blank_image)
-        else:
-            img = cv2.resize(squares_processed[i], (32, 32))
-            formatted_squares.append(img)
+    for index, cell in enumerate(squares_processed):
 
-    formatted_squares = np.array(formatted_squares)
-    all_preds = list(map(np.argmax, model(tf.convert_to_tensor(formatted_squares))))
-    for i in range(len(all_preds)):
-        if i in location_of_zeroes:
-            s += "0"
-        else:
-            s += str(all_preds[i] + 1)
+        # Skip empty cells
+        if isinstance(cell, int):
+            continue
 
-    return s
+        img = cv2.resize(cell, (32, 32))
+
+        formatted_squares.append(img)
+        positions.append(index)
+
+    result = ["0"] * 81
+
+    # Handle a completely empty Sudoku grid
+    if not formatted_squares:
+        return "".join(result)
+
+    inputs = np.array(
+        formatted_squares,
+        dtype=np.float32
+    )
+
+    # Add grayscale channel dimension
+    inputs = np.expand_dims(inputs, axis=-1)
+
+    # Perform batch inference
+    predictions = model(
+        tf.convert_to_tensor(inputs),
+        training=False
+    )
+
+    predicted_classes = np.argmax(
+        predictions.numpy(),
+        axis=1
+    )
+
+    for index, position in enumerate(positions):
+        result[position] = str(
+            predicted_classes[index] + 1
+        )
+
+    return "".join(result)
 
 
 def draw_digits_on_warped(warped_img, solved_puzzle, squares_processed):
@@ -189,3 +263,39 @@ def unwarp_image(img_src, img_dest, pts, time):
     cv2.putText(dst_img, time, (dst_img_width - 250, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 0, 0), 2)
 
     return dst_img
+
+
+
+
+def extract_grayscale_cells(warped):
+
+    gray = cv2.cvtColor(
+        warped,
+        cv2.COLOR_BGR2GRAY
+    )
+
+    height, width = gray.shape
+
+    cells = []
+
+    for row in range(9):
+
+        for col in range(9):
+
+            y1 = row * height // 9
+            y2 = (row + 1) * height // 9
+
+            x1 = col * width // 9
+            x2 = (col + 1) * width // 9
+
+            cell = gray[y1:y2, x1:x2]
+
+            digit = process_helpers.extract_digit(
+                cell,
+                contrast=20,
+                target_height=22
+            )
+
+            cells.append(digit)
+
+    return cells

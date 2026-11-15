@@ -19,25 +19,71 @@ def draw_extreme_corners(pts, original):
 
 
 def clean_helper(img):
-    # print(np.isclose(img, 0).sum())
-    if np.isclose(img, 0).sum() / (img.shape[0] * img.shape[1]) >= 0.95:
-        return np.zeros_like(img), False
-
-    # if there is very little white in the region around the center, this means we got an edge accidently
     height, width = img.shape
-    mid = width // 2
-    if np.isclose(img[:, int(mid - width * 0.4):int(mid + width * 0.4)], 0).sum() / (2 * width * 0.4 * height) >= 0.90:
+
+    # Ignore the cell borders to remove residual grid lines
+    margin_x = int(width * 0.12)
+    margin_y = int(height * 0.12)
+
+    cropped = img[
+        margin_y:height - margin_y,
+        margin_x:width - margin_x
+    ]
+
+    if cropped.size == 0:
         return np.zeros_like(img), False
 
-    # center image
-    contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-    x, y, w, h = cv2.boundingRect(contours[0])
+    # Find connected white objects
+    count, labels, stats, centers = (
+        cv2.connectedComponentsWithStats(
+            cropped,
+            connectivity=8
+        )
+    )
+
+    candidates = []
+
+    # Label 0 represents the background
+    for index in range(1, count):
+        x, y, w, h, area = stats[index]
+
+        # Reject small noise components
+        if area < height * width * 0.01:
+            continue
+
+        # Reject objects that are too short
+        if h < height * 0.25:
+            continue
+
+        candidates.append(index)
+
+    # No digit-like component was found
+    if not candidates:
+        return np.zeros_like(img), False
+
+    # Select the largest valid component
+    index = max(
+        candidates,
+        key=lambda i: stats[i, cv2.CC_STAT_AREA]
+    )
+
+    x, y, w, h, area = stats[index]
+
+    # Isolate the selected digit
+    component = np.uint8(labels == index) * 255
+
+    digit = component[y:y + h, x:x + w]
+
+    # Center the digit inside an empty cell
+    new_img = np.zeros_like(img)
 
     start_x = (width - w) // 2
     start_y = (height - h) // 2
-    new_img = np.zeros_like(img)
-    new_img[start_y:start_y + h, start_x:start_x + w] = img[y:y + h, x:x + w]
+
+    new_img[
+        start_y:start_y + h,
+        start_x:start_x + w
+    ] = digit
 
     return new_img, True
 
@@ -63,19 +109,129 @@ def grid_line_helper(img, shape_location, length=10):
 
 
 def draw_lines(img, lines):
-    # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_houghlines/py_houghlines.html
+
     clone = img.copy()
-    lines = np.squeeze(lines)
+
+    if lines is None:
+        return clone
+
+    lines = np.asarray(lines).reshape(-1, 2)
 
     for rho, theta in lines:
-        # find out where the line stretches to and draw them
+
         a = np.cos(theta)
         b = np.sin(theta)
+
         x0 = a * rho
         y0 = b * rho
+
         x1 = int(x0 + 1000 * (-b))
         y1 = int(y0 + 1000 * a)
+
         x2 = int(x0 - 1000 * (-b))
         y2 = int(y0 - 1000 * a)
-        cv2.line(clone, (x1, y1), (x2, y2), (255, 255, 255), 4)
+
+        cv2.line(
+            clone,
+            (x1, y1),
+            (x2, y2),
+            255,
+            4
+        )
+
     return clone
+
+
+def extract_digit(cell, contrast=20, target_height=22):
+
+    height, width = cell.shape
+
+    blurred = cv2.GaussianBlur(cell, (3, 3), 0)
+
+    margin_x = int(width * 0.15)
+    margin_y = int(height * 0.15)
+
+    cropped = blurred[
+        margin_y:height - margin_y,
+        margin_x:width - margin_x
+    ]
+
+    if cropped.size == 0:
+        return 0
+
+    background = np.median(cropped)
+
+    threshold = background - contrast
+
+    binary = np.uint8(
+        cropped < threshold
+    ) * 255
+
+    count, labels, stats, centers = (
+        cv2.connectedComponentsWithStats(
+            binary,
+            connectivity=8
+        )
+    )
+
+    candidates = []
+
+    for index in range(1, count):
+
+        x, y, w, h, area = stats[index]
+
+        if area < width * height * 0.01:
+            continue
+
+        if h < height * 0.25:
+            continue
+
+        candidates.append(index)
+
+    if not candidates:
+        return 0
+
+    index = max(
+        candidates,
+        key=lambda i: stats[i, cv2.CC_STAT_AREA]
+    )
+
+    x, y, w, h, area = stats[index]
+
+    component = np.uint8(
+        labels == index
+    ) * 255
+
+    digit = component[y:y + h, x:x + w]
+
+    scale = target_height / h
+
+    new_width = max(1, int(round(w * scale)))
+    new_height = target_height
+
+    if new_width > 28:
+
+        scale = 28 / w
+        new_width = 28
+        new_height = max(1, int(round(h * scale)))
+
+    digit = cv2.resize(
+        digit,
+        (new_width, new_height),
+        interpolation=cv2.INTER_LINEAR
+    )
+
+    canvas = np.zeros(
+        (32, 32),
+        dtype=np.uint8
+    )
+
+    offset_x = (32 - new_width) // 2
+    offset_y = (32 - new_height) // 2
+
+    canvas[
+        offset_y:offset_y + new_height,
+        offset_x:offset_x + new_width
+    ] = digit
+
+    return canvas

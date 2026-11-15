@@ -136,3 +136,25 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+
+# Virtual environments
+.venv/
+.venv38/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE settings
+.idea/
+.vscode/
+
+# Generated debug outputs
+debug_*/
+debug_*.zip
+/webcam_capture.png
+
+# Backup files
+*.bak

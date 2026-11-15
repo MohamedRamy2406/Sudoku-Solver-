@@ -4,7 +4,7 @@ import cv2
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 
-from current import process, sudoku
+from core import process, sudoku
 from models import model_wrapper
 from preprocessing import preprocess
 
@@ -171,7 +171,7 @@ def main():
         None,
         False,
         None,
-        "model.hdf5"
+        "models/model.hdf5"
     )
 
     print("Model loaded successfully.")

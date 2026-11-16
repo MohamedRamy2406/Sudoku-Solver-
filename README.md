@@ -130,11 +130,3 @@ These results represent the three regression test images. Recognition performanc
 - Responsive camera processing.
 - Modular project organization.
 
-## Acknowledgments
-
-Based on the original Sudoku Solver using OpenCV project by dharm1k987.
-
-The Sudoku-solving algorithm is based on Ali Assaf's Algorithm X implementation.
-
-- Original project: https://github.com/dharm1k987/sudoku-solver-opencv
-- Algorithm X implementation: https://www.cs.mcgill.ca/~aassaf9/python/sudoku.txt
